@@ -49,16 +49,19 @@ The migration converts all Hive `raw.*` tables to native BigQuery DDL with:
 bigquery/raw/
 ├── tables/                          # 19 individual CREATE TABLE DDL files
 ├── views/                           # 2 CREATE VIEW DDL files
-├── validation/                      # Validation scripts
-│   ├── ac_assertions.js             # AC assertion suite (119 checks)
-│   ├── schema_parity.mjs            # Live Hive → BQ schema comparison
+├── validation/                      # Validation scripts & report
+│   ├── VALIDATION_REPORT.md         # Full validation report with pass/fail per AC
+│   ├── dry_run_results.md           # Dry-run execution evidence log
+│   ├── ac_assertions.mjs            # AC assertion suite — ESM (116 checks, AC-2–AC-14)
+│   ├── ac_assertions.js             # AC assertion suite — CJS (119 checks, AC-1–AC-14)
+│   ├── schema_parity.mjs            # Live Hive → BQ schema comparison (AC-13)
+│   ├── audit_ddl.mjs                # Static DDL audit against source schema rules
 │   ├── validate_schema_parity.js    # File-based schema comparison
 │   ├── dry_run_group1.js            # BQ dry-run: 12 date_ts tables
 │   ├── dry_run_group2to6.js         # BQ dry-run: 5 specialty tables
 │   ├── dry_run_group7_views.js      # BQ dry-run: 2 Avro tables + 2 views
 │   └── run_all_validation.sh        # Master validation runner
 ├── all_tables.sql                   # Master DDL (all tables + views in order)
-└── VALIDATION_REPORT.md             # Full validation report with pass/fail per AC
 ```
 
 ## Validation
@@ -82,7 +85,7 @@ All 14 acceptance criteria have been validated:
 | AC-13 | ✅ | Schema parity: all columns present with correct mapped types |
 | AC-14 | ✅ | 12 date_ts tables: partition_ts TIMESTAMP at HOUR granularity |
 
-See [`bigquery/raw/VALIDATION_REPORT.md`](bigquery/raw/VALIDATION_REPORT.md) for the full report.
+See [`bigquery/raw/validation/VALIDATION_REPORT.md`](bigquery/raw/validation/VALIDATION_REPORT.md) for the full report.
 
 ## Running Validation
 
@@ -95,7 +98,9 @@ bash bigquery/raw/validation/run_all_validation.sh
 bash bigquery/raw/validation/run_all_validation.sh --local-only
 
 # Individual scripts:
-node bigquery/raw/validation/ac_assertions.js             # AC spot checks
-node bigquery/raw/validation/schema_parity.mjs            # Live Hive comparison
+node bigquery/raw/validation/ac_assertions.mjs            # AC-2 through AC-14 spot checks (ESM)
+node bigquery/raw/validation/ac_assertions.js             # AC-1 through AC-14 spot checks (CJS)
+node bigquery/raw/validation/schema_parity.mjs            # Live Hive ↔ BQ comparison (AC-13)
+node bigquery/raw/validation/audit_ddl.mjs                # Static DDL audit
 node bigquery/raw/validation/validate_schema_parity.js    # File-based comparison
 ```
