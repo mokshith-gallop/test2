@@ -76,6 +76,10 @@ async function main() {
     }
   }
 
+  // Wait for table metadata to propagate in BigQuery
+  console.log('  Waiting 5s for table metadata propagation...');
+  await new Promise(resolve => setTimeout(resolve, 5000));
+
   // ─── Phase 3: Dry-run the 2 view DDLs ─────────────────────────────
   console.log('\n--- Dry-running views ---');
   const views = ['omniture', 'v_fraud_signals_recent'];
