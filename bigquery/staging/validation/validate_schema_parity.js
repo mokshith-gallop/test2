@@ -4,10 +4,21 @@
  * Reads source Hive schemas from the staging HQL file (06-staging-tables.hql),
  * reads target BigQuery schemas from the generated DDL files,
  * compares column-by-column applying the type mapping rules,
- * validates dropped/synthetic partition columns and partition/cluster intent.
+ * validates dropped/synthetic partition columns and partition/cluster expressions.
  *
  * Covers AC-4: every source column present in target with correctly mapped type,
  * no column dropped or added beyond synthetic partition columns.
+ *
+ * Validates:
+ *  - Hive→BQ type mappings (STRING→STRING, INT→INT64, BIGINT→INT64, BOOLEAN→BOOL,
+ *    DOUBLE→FLOAT64, DECIMAL(p,s)→NUMERIC, MAP<K,V>→JSON, ARRAY<T>→ARRAY<mapped>,
+ *    DATE→DATE, TIMESTAMP→TIMESTAMP)
+ *  - Dropped partition columns (date_ts STRING on 4 tables)
+ *  - Synthetic partition columns (event_date DATE, snapshot_date DATE)
+ *  - Promoted partition columns (country_partition on dedup_clickstream)
+ *  - Partition expressions (PARTITION BY col_name)
+ *  - Cluster expressions (CLUSTER BY col1, col2)
+ *  - No unexpected columns added or original columns lost
  */
 
 const { readFileSync } = require('fs');
@@ -106,7 +117,7 @@ function parseHiveTablesFromHQL(hqlContent) {
   const cleaned = cleanedLines.join('\n');
 
   // Match CREATE TABLE staging.table_name (...) PARTITIONED BY (...)
-  // Some tables also have CLUSTERED BY (...) INTO N BUCKETS
+  // Uses lazy match for column block, anchored at PARTITIONED BY
   const regex = /CREATE\s+TABLE\s+staging\.(\w+)\s*\(([\s\S]*?)\)\s*\nPARTITIONED\s+BY\s*\(([^)]*)\)/gi;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
@@ -133,7 +144,8 @@ function parseHiveTablesFromHQL(hqlContent) {
 }
 
 /**
- * Parse a Hive column block: split by top-level commas, extract name + type
+ * Parse a Hive column block: split by top-level commas, extract name + type.
+ * Handles multi-line STRUCT/ARRAY definitions with nested angle brackets.
  */
 function parseHiveColumnBlock(colBlock) {
   const cols = [];
@@ -150,7 +162,7 @@ function parseHiveColumnBlock(colBlock) {
     // Clean up whitespace inside type
     type = type.replace(/\s+/g, ' ').trim();
 
-    // Skip keyword lines
+    // Skip keyword lines (shouldn't appear inside column block, but safety guard)
     if (['create', 'external', 'table', 'partitioned', 'row', 'stored', 'drop'].includes(name)) continue;
 
     cols.push({ name, type });
@@ -206,7 +218,7 @@ function parseBQDDL(filePath) {
     result.partitionExpr = partMatch[1].trim().replace(/;$/, '').replace(/\n.*$/s, '').trim();
   }
 
-  // Extract CLUSTER BY (full list)
+  // Extract CLUSTER BY (full list, handles multi-column)
   const clusterMatch = afterCols.match(/CLUSTER\s+BY\s+([^;]+)/i);
   if (clusterMatch) {
     result.clusterBy = clusterMatch[1].trim().replace(/;$/, '').trim();
@@ -234,14 +246,14 @@ function parseBQColumns(colBlock) {
 
 // ─── Table-specific config ─────────────────────────────────────────
 // Describes the expected transformation for each staging table.
-// droppedParts:  partition columns removed from BQ DDL
+// droppedParts:  Hive partition columns removed from BQ DDL
 // syntheticCols: new columns added in BQ DDL (not in Hive source)
-// promotedParts: partition columns that become regular data columns in BQ
+// promotedParts: Hive partition columns that become regular data columns in BQ
 // partition:     expected BQ PARTITION BY expression
 // cluster:       expected BQ CLUSTER BY expression (null if none)
 
 const TABLE_CONFIG = {
-  // 6 tables with native DATE partitions — kept as-is
+  // ── Group 1: 6 tables with native DATE partitions — kept as-is ──
   cleansed_orders: {
     droppedParts: [],
     syntheticCols: [],
@@ -285,7 +297,7 @@ const TABLE_CONFIG = {
     cluster: null
   },
 
-  // 3 tables with date_ts STRING → synthetic DATE partition
+  // ── Group 2: 3 tables with date_ts STRING → synthetic DATE partition ──
   parsed_loyalty_events: {
     droppedParts: ['date_ts'],
     syntheticCols: [{ name: 'event_date', type: 'DATE' }],
@@ -308,7 +320,10 @@ const TABLE_CONFIG = {
     cluster: null
   },
 
-  // 1 table with dual STRING partitions + bucketing → synthetic DATE + CLUSTER BY
+  // ── Group 3: 1 table with dual STRING partitions + bucketing ──
+  //    date_ts STRING → event_date DATE (synthetic)
+  //    country_partition STRING → promoted to data column
+  //    CLUSTERED BY (user_id) INTO 16 BUCKETS → CLUSTER BY country_partition, user_id
   dedup_clickstream: {
     droppedParts: ['date_ts'],
     syntheticCols: [{ name: 'event_date', type: 'DATE' }],
@@ -341,8 +356,12 @@ function main() {
   const hqlContent = readFileSync(HIVE_HQL, 'utf-8');
   const allHiveTables = parseHiveTablesFromHQL(hqlContent);
 
-  console.log(`Parsed ${Object.keys(allHiveTables).length} Hive tables from staging HQL`);
-  console.log(`Expected: 10 tables\n`);
+  const hiveTableCount = Object.keys(allHiveTables).length;
+  console.log(`Parsed ${hiveTableCount} Hive tables from staging HQL`);
+  console.log(`Expected: 10 tables`);
+  check('_global', `Hive HQL contains 10 table definitions`,
+    hiveTableCount === 10,
+    `Parsed ${hiveTableCount} tables, expected 10`);
 
   // ─ Validate each table ───────────────────────────────────────────
   for (const [tableName, config] of Object.entries(TABLE_CONFIG)) {
@@ -479,6 +498,35 @@ function main() {
     check(tableName, `Column count: ${actualCount} (expected ${expectedCount})`,
       actualCount === expectedCount,
       actualCount === expectedCount ? '' : `Expected ${expectedCount}, got ${actualCount}`);
+  }
+
+  // ─── Cross-table validations ─────────────────────────────────────
+  console.log('\n── Cross-table validations ──');
+
+  // Verify all date_ts STRING tables had the partition column dropped
+  const dateTsTables = ['parsed_loyalty_events', 'normalized_carrier_events',
+                        'warehouse_kpi_snapshot', 'dedup_clickstream'];
+  for (const t of dateTsTables) {
+    const bq = parseBQDDL(join(BQ_DIR, `${t}.sql`));
+    const hasDateTs = bq.columns.some(c => c.name === 'date_ts');
+    check(t, `date_ts STRING dropped across all date_ts tables (${t})`,
+      !hasDateTs,
+      hasDateTs ? 'date_ts still present' : '');
+  }
+
+  // Verify all synthetic DATE columns exist
+  const syntheticDateTables = {
+    'parsed_loyalty_events': 'event_date',
+    'normalized_carrier_events': 'event_date',
+    'warehouse_kpi_snapshot': 'snapshot_date',
+    'dedup_clickstream': 'event_date',
+  };
+  for (const [t, colName] of Object.entries(syntheticDateTables)) {
+    const bq = parseBQDDL(join(BQ_DIR, `${t}.sql`));
+    const col = bq.columns.find(c => c.name === colName);
+    check(t, `Synthetic ${colName} DATE exists (${t})`,
+      col && col.type.toUpperCase() === 'DATE',
+      col ? (col.type.toUpperCase() === 'DATE' ? '' : `Expected DATE, got ${col.type}`) : `${colName} missing`);
   }
 
   // ─ Summary ───────────────────────────────────────────────────────

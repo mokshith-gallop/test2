@@ -2,9 +2,13 @@
  * ac_assertions.js
  *
  * Acceptance Criteria assertion suite for staging DDL (AC-1 through AC-6).
- * Each test function parses the generated DDL file and asserts
- * the exact column types, partition expressions, cluster-by clauses,
- * and view translations.
+ * Follows the raw layer's pattern (parseDDL helper, assert/assertEq/assertIncludes
+ * framework) adapted for the staging schema conversion.
+ *
+ * AC-1: All 11 DDL files exist (10 tables + 1 view)
+ * AC-2: dedup_clickstream partition/cluster conversion
+ * AC-3: Complex type mappings (MAP→JSON, ARRAY<STRING> preserved)
+ * AC-6: v_returns_pending cross-dataset reference + function translation
  */
 
 const { readFileSync, readdirSync, existsSync } = require('fs');
@@ -36,12 +40,17 @@ function splitTopLevel(s, delim) {
   return parts;
 }
 
+/**
+ * parseDDL — parse a BigQuery CREATE TABLE DDL into columns, partitionExpr,
+ * clusterBy, and raw content.  Handles nested STRUCT<>/ARRAY<> types,
+ * multi-column CLUSTER BY lists, and comment stripping.
+ */
 function parseDDL(tableName, dir) {
   dir = dir || TABLES_DIR;
   const content = readFileSync(join(dir, `${tableName}.sql`), 'utf-8');
   const stripped = content.replace(/--.*$/gm, '').trim();
 
-  // Extract columns
+  // Extract columns between first ( and matching )
   const openParen = stripped.indexOf('(');
   let depth = 0, closeParen = -1;
   for (let i = openParen; i < stripped.length; i++) {
@@ -143,6 +152,11 @@ function assertColAbsent(ac, desc, columns, colName) {
   assert(ac, desc, !(colName in columns), `Column ${colName} should be absent`);
 }
 
+function assertMatches(ac, desc, haystack, pattern) {
+  assert(ac, desc, pattern.test(haystack),
+    `Pattern ${pattern} not matched`);
+}
+
 // ─── AC-1: All 11 DDL files exist ─────────────────────────────────
 function testAC1() {
   console.log('\nAC-1: All 10 table + 1 view DDL files exist');
@@ -176,6 +190,11 @@ function testAC1() {
       existsSync(join(VIEWS_DIR, `${v}.sql`)),
       `${v}.sql not found`);
   }
+
+  // Total: 10 tables + 1 view = 11 DDL files
+  assert('AC-1', `Total 11 DDL files (${tableFiles.length} tables + ${viewFiles.length} views)`,
+    tableFiles.length + viewFiles.length === 11,
+    `Found ${tableFiles.length + viewFiles.length} files, expected 11`);
 }
 
 // ─── AC-2: dedup_clickstream partition/cluster conversion ──────────
@@ -192,13 +211,15 @@ function testAC2() {
   assertEq('AC-2', 'CLUSTER BY country_partition, user_id',
     ddl.clusterBy, 'country_partition, user_id');
 
-  // 3. No BUCKETS or CLUSTERED BY ... INTO in DDL
+  // 3. No BUCKETS or CLUSTERED BY ... INTO in DDL (Hive bucketing retired)
   assertNotIncludes('AC-2', 'no BUCKETS keyword in DDL',
     sqlBody.toUpperCase(), 'BUCKETS');
   assertNotIncludes('AC-2', 'no CLUSTERED BY ... INTO in DDL',
     sqlBody.toUpperCase(), 'CLUSTERED BY');
+  assertNotIncludes('AC-2', 'no INTO keyword in DDL body',
+    stripComments(ddl.raw).toUpperCase(), 'INTO 16');
 
-  // 4. event_date column declared as DATE
+  // 4. event_date column declared as DATE (synthetic partition col)
   assertColType('AC-2', 'event_date is DATE', ddl.columns, 'event_date', 'DATE');
 
   // 5. country_partition is present as a regular STRING data column
@@ -207,18 +228,31 @@ function testAC2() {
 
   // 6. date_ts STRING partition column is absent from DDL
   assertColAbsent('AC-2', 'date_ts absent from DDL', ddl.columns, 'date_ts');
+
+  // 7. Verify country_partition is in column block, not just in CLUSTER BY
+  //    (it should be a data column, not merely referenced in CLUSTER)
+  const colNames = Object.keys(ddl.columns);
+  assert('AC-2', 'country_partition in column definitions (not only CLUSTER BY)',
+    colNames.includes('country_partition'),
+    'country_partition must be declared as a data column');
+
+  // 8. No Hive storage format references
+  assertNotIncludes('AC-2', 'no STORED AS in DDL',
+    sqlBody.toUpperCase(), 'STORED AS');
+  assertNotIncludes('AC-2', 'no PARQUET format directive',
+    stripComments(ddl.raw).toUpperCase(), 'STORED AS PARQUET');
 }
 
 // ─── AC-3: Complex type mappings (MAP→JSON, ARRAY→repeated) ───────
 function testAC3() {
   console.log('\nAC-3: Complex type mappings');
 
-  // 1. parsed_loyalty_events.meta is JSON
+  // 1. parsed_loyalty_events.meta is JSON (was MAP<STRING,STRING>)
   const loyalty = parseDDL('parsed_loyalty_events');
   assertColType('AC-3', 'parsed_loyalty_events.meta is JSON',
     loyalty.columns, 'meta', 'JSON');
 
-  // 2. fraud_scored.signals is ARRAY<STRING>
+  // 2. fraud_scored.signals is ARRAY<STRING> (kept from Hive)
   const fraud = parseDDL('fraud_scored');
   assertColType('AC-3', 'fraud_scored.signals is ARRAY<STRING>',
     fraud.columns, 'signals', 'ARRAY<STRING>');
@@ -236,6 +270,16 @@ function testAC3() {
     fraudSql, 'CREATE OR REPLACE TABLE');
   assertIncludes('AC-3', 'fraud_scored has PARTITION BY',
     fraudSql, 'PARTITION BY');
+
+  // 5. Verify ARRAY<STRING> is not flattened/lowered (exact case in DDL)
+  assertIncludes('AC-3', 'fraud_scored DDL contains literal ARRAY<STRING>',
+    fraudSql, 'ARRAY<STRING>');
+
+  // 6. Verify JSON is literal in DDL (not MAP<STRING,STRING>)
+  assertIncludes('AC-3', 'parsed_loyalty_events DDL contains literal JSON type',
+    loyaltySql, 'JSON');
+  assertNotIncludes('AC-3', 'parsed_loyalty_events DDL has no MAP<',
+    loyaltySql, 'MAP<');
 }
 
 // ─── AC-6: v_returns_pending cross-dataset + function translation ──
@@ -263,6 +307,20 @@ function testAC6() {
   // 5. Uses CREATE OR REPLACE VIEW
   assertIncludes('AC-6', 'uses CREATE OR REPLACE VIEW',
     sqlBody, 'CREATE OR REPLACE VIEW');
+
+  // 6. No bare raw.return_authorizations without backtick-quoting
+  //    (should be fully qualified with project ID)
+  const bareRef = sqlBody.match(/(?<!`acme-analytics\.)raw\.return_authorizations(?!`)/);
+  assert('AC-6', 'no bare raw.return_authorizations (must be fully qualified)',
+    !bareRef, 'Found unqualified raw.return_authorizations reference');
+
+  // 7. View references the correct columns from source Hive view
+  assertIncludes('AC-6', 'view selects rma_id', sqlBody, 'rma_id');
+  assertIncludes('AC-6', 'view selects customer_id', sqlBody, 'customer_id');
+  assertIncludes('AC-6', 'view computes days_pending', sqlBody, 'days_pending');
+
+  // 8. No Hive-specific current_date() syntax (BigQuery uses CURRENT_DATE())
+  assertIncludes('AC-6', 'uses CURRENT_DATE()', sqlBody, 'CURRENT_DATE()');
 }
 
 // ─── Run all tests ─────────────────────────────────────────────────
