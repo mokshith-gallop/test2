@@ -18,7 +18,7 @@ CREATE OR REPLACE TABLE `acme-analytics.raw.mobile_events` (
   app_version     STRING,
   device_type     STRING,
   platform        STRING,
-  properties      JSON,
+  properties      STRING,
   context         STRUCT<ip STRING, country STRING, session_id STRING, referrer STRING>,
   items           ARRAY<STRUCT<sku STRING, qty INT64, price NUMERIC>>,
   event_timestamp TIMESTAMP
