@@ -1,14 +1,18 @@
 /**
  * ac_assertions.js
  *
- * Acceptance Criteria assertion suite for staging DDL (AC-1 through AC-6).
+ * Acceptance Criteria assertion suite for staging DDL (AC-1 through AC-8).
  * Follows the raw layer's pattern (parseDDL helper, assert/assertEq/assertIncludes
  * framework) adapted for the staging schema conversion.
  *
- * AC-1: All 11 DDL files exist (10 tables + 1 view)
+ * AC-1: All 11 DDL files exist (10 tables + 1 view) — dry-run zero errors (offline file checks)
  * AC-2: dedup_clickstream partition/cluster conversion
- * AC-3: Complex type mappings (MAP→JSON, ARRAY<STRING> preserved)
- * AC-6: v_returns_pending cross-dataset reference + function translation
+ * AC-3: parsed_loyalty_events.meta MAP→JSON mapping
+ * AC-4: fraud_scored.signals ARRAY<STRING> preserved
+ * AC-5: v_returns_pending cross-dataset reference + function translation
+ * AC-6: Schema parity — every source column present with correct mapped type (stub; full check in validate_schema_parity.js)
+ * AC-7: DECIMAL(14,2) → NUMERIC precision preservation (stub; full check in edge_value_probes.js)
+ * AC-8: DOUBLE → FLOAT64 17-significant-digit precision (stub; full check in edge_value_probes.js)
  */
 
 const { readFileSync, readdirSync, existsSync } = require('fs');
@@ -216,7 +220,7 @@ function testAC2() {
     sqlBody.toUpperCase(), 'BUCKETS');
   assertNotIncludes('AC-2', 'no CLUSTERED BY ... INTO in DDL',
     sqlBody.toUpperCase(), 'CLUSTERED BY');
-  assertNotIncludes('AC-2', 'no INTO keyword in DDL body',
+  assertNotIncludes('AC-2', 'no INTO 16 keyword in DDL body',
     stripComments(ddl.raw).toUpperCase(), 'INTO 16');
 
   // 4. event_date column declared as DATE (synthetic partition col)
@@ -230,7 +234,6 @@ function testAC2() {
   assertColAbsent('AC-2', 'date_ts absent from DDL', ddl.columns, 'date_ts');
 
   // 7. Verify country_partition is in column block, not just in CLUSTER BY
-  //    (it should be a data column, not merely referenced in CLUSTER)
   const colNames = Object.keys(ddl.columns);
   assert('AC-2', 'country_partition in column definitions (not only CLUSTER BY)',
     colNames.includes('country_partition'),
@@ -243,84 +246,193 @@ function testAC2() {
     stripComments(ddl.raw).toUpperCase(), 'STORED AS PARQUET');
 }
 
-// ─── AC-3: Complex type mappings (MAP→JSON, ARRAY→repeated) ───────
+// ─── AC-3: parsed_loyalty_events.meta MAP→JSON ────────────────────
 function testAC3() {
-  console.log('\nAC-3: Complex type mappings');
+  console.log('\nAC-3: parsed_loyalty_events.meta MAP→JSON mapping');
+  const ddl = parseDDL('parsed_loyalty_events');
+  const sqlBody = stripComments(ddl.raw);
 
-  // 1. parsed_loyalty_events.meta is JSON (was MAP<STRING,STRING>)
-  const loyalty = parseDDL('parsed_loyalty_events');
+  // 1. meta column is JSON type
   assertColType('AC-3', 'parsed_loyalty_events.meta is JSON',
-    loyalty.columns, 'meta', 'JSON');
+    ddl.columns, 'meta', 'JSON');
 
-  // 2. fraud_scored.signals is ARRAY<STRING> (kept from Hive)
-  const fraud = parseDDL('fraud_scored');
-  assertColType('AC-3', 'fraud_scored.signals is ARRAY<STRING>',
-    fraud.columns, 'signals', 'ARRAY<STRING>');
+  // 2. DDL contains literal JSON type keyword
+  assertIncludes('AC-3', 'DDL contains literal JSON type',
+    sqlBody, 'JSON');
 
-  // 3. parsed_loyalty_events DDL is syntactically valid (has CREATE and PARTITION)
-  const loyaltySql = stripComments(loyalty.raw);
-  assertIncludes('AC-3', 'parsed_loyalty_events has CREATE OR REPLACE TABLE',
-    loyaltySql, 'CREATE OR REPLACE TABLE');
-  assertIncludes('AC-3', 'parsed_loyalty_events has PARTITION BY',
-    loyaltySql, 'PARTITION BY');
+  // 3. No MAP< remnant in executable SQL
+  assertNotIncludes('AC-3', 'no MAP< in DDL SQL',
+    sqlBody, 'MAP<');
 
-  // 4. fraud_scored DDL is syntactically valid (has CREATE and PARTITION)
-  const fraudSql = stripComments(fraud.raw);
-  assertIncludes('AC-3', 'fraud_scored has CREATE OR REPLACE TABLE',
-    fraudSql, 'CREATE OR REPLACE TABLE');
-  assertIncludes('AC-3', 'fraud_scored has PARTITION BY',
-    fraudSql, 'PARTITION BY');
-
-  // 5. Verify ARRAY<STRING> is not flattened/lowered (exact case in DDL)
-  assertIncludes('AC-3', 'fraud_scored DDL contains literal ARRAY<STRING>',
-    fraudSql, 'ARRAY<STRING>');
-
-  // 6. Verify JSON is literal in DDL (not MAP<STRING,STRING>)
-  assertIncludes('AC-3', 'parsed_loyalty_events DDL contains literal JSON type',
-    loyaltySql, 'JSON');
-  assertNotIncludes('AC-3', 'parsed_loyalty_events DDL has no MAP<',
-    loyaltySql, 'MAP<');
+  // 4. DDL is syntactically valid (has CREATE and PARTITION)
+  assertIncludes('AC-3', 'has CREATE OR REPLACE TABLE',
+    sqlBody, 'CREATE OR REPLACE TABLE');
+  assertIncludes('AC-3', 'has PARTITION BY',
+    sqlBody, 'PARTITION BY');
 }
 
-// ─── AC-6: v_returns_pending cross-dataset + function translation ──
-function testAC6() {
-  console.log('\nAC-6: v_returns_pending view');
+// ─── AC-4: fraud_scored.signals ARRAY<STRING> ─────────────────────
+function testAC4() {
+  console.log('\nAC-4: fraud_scored.signals ARRAY<STRING> preserved');
+  const ddl = parseDDL('fraud_scored');
+  const sqlBody = stripComments(ddl.raw);
+
+  // 1. signals column is ARRAY<STRING>
+  assertColType('AC-4', 'fraud_scored.signals is ARRAY<STRING>',
+    ddl.columns, 'signals', 'ARRAY<STRING>');
+
+  // 2. DDL contains literal ARRAY<STRING> (not flattened or lowered)
+  assertIncludes('AC-4', 'DDL contains literal ARRAY<STRING>',
+    sqlBody, 'ARRAY<STRING>');
+
+  // 3. DDL is syntactically valid (has CREATE and PARTITION)
+  assertIncludes('AC-4', 'has CREATE OR REPLACE TABLE',
+    sqlBody, 'CREATE OR REPLACE TABLE');
+  assertIncludes('AC-4', 'has PARTITION BY',
+    sqlBody, 'PARTITION BY');
+}
+
+// ─── AC-5: v_returns_pending cross-dataset + function translation ──
+function testAC5() {
+  console.log('\nAC-5: v_returns_pending cross-dataset reference + function translation');
   const view = parseView('v_returns_pending');
   const sqlBody = view.sql;
 
   // 1. Fully qualified reference to raw.return_authorizations
-  assertIncludes('AC-6',
+  assertIncludes('AC-5',
     'references `acme-analytics.raw.return_authorizations`',
     sqlBody, '`acme-analytics.raw.return_authorizations`');
 
   // 2. Uses DATE_DIFF(CURRENT_DATE(), DATE(r.requested_at), DAY)
-  assertIncludes('AC-6',
+  assertIncludes('AC-5',
     'uses DATE_DIFF(CURRENT_DATE(), DATE(r.requested_at), DAY)',
     sqlBody, 'DATE_DIFF(CURRENT_DATE(), DATE(r.requested_at), DAY)');
 
   // 3. Does NOT contain DATEDIFF( (Hive function)
-  assertNotIncludes('AC-6', 'no DATEDIFF( in DDL', sqlBody, 'DATEDIFF(');
+  assertNotIncludes('AC-5', 'no DATEDIFF( in DDL', sqlBody, 'DATEDIFF(');
 
   // 4. Does NOT contain to_date( (Hive function)
-  assertNotIncludes('AC-6', 'no to_date( in DDL', sqlBody, 'to_date(');
+  assertNotIncludes('AC-5', 'no to_date( in DDL', sqlBody, 'to_date(');
 
   // 5. Uses CREATE OR REPLACE VIEW
-  assertIncludes('AC-6', 'uses CREATE OR REPLACE VIEW',
+  assertIncludes('AC-5', 'uses CREATE OR REPLACE VIEW',
     sqlBody, 'CREATE OR REPLACE VIEW');
 
   // 6. No bare raw.return_authorizations without backtick-quoting
-  //    (should be fully qualified with project ID)
   const bareRef = sqlBody.match(/(?<!`acme-analytics\.)raw\.return_authorizations(?!`)/);
-  assert('AC-6', 'no bare raw.return_authorizations (must be fully qualified)',
+  assert('AC-5', 'no bare raw.return_authorizations (must be fully qualified)',
     !bareRef, 'Found unqualified raw.return_authorizations reference');
 
   // 7. View references the correct columns from source Hive view
-  assertIncludes('AC-6', 'view selects rma_id', sqlBody, 'rma_id');
-  assertIncludes('AC-6', 'view selects customer_id', sqlBody, 'customer_id');
-  assertIncludes('AC-6', 'view computes days_pending', sqlBody, 'days_pending');
+  assertIncludes('AC-5', 'view selects rma_id', sqlBody, 'rma_id');
+  assertIncludes('AC-5', 'view selects customer_id', sqlBody, 'customer_id');
+  assertIncludes('AC-5', 'view computes days_pending', sqlBody, 'days_pending');
 
   // 8. No Hive-specific current_date() syntax (BigQuery uses CURRENT_DATE())
-  assertIncludes('AC-6', 'uses CURRENT_DATE()', sqlBody, 'CURRENT_DATE()');
+  assertIncludes('AC-5', 'uses CURRENT_DATE()', sqlBody, 'CURRENT_DATE()');
+}
+
+// ─── AC-6: Schema parity (offline DDL structural check) ───────────
+function testAC6() {
+  console.log('\nAC-6: Schema parity — structural DDL checks (full parity in validate_schema_parity.js)');
+
+  // Verify each of the 10 tables has: correct project ID, CREATE OR REPLACE TABLE,
+  // PARTITION BY, and correct dataset reference.
+  const expectedTables = [
+    'cleansed_orders', 'cleansed_customers', 'cleansed_products',
+    'dedup_clickstream', 'geocoded_addresses', 'parsed_loyalty_events',
+    'merged_returns_cdc', 'normalized_carrier_events', 'fraud_scored',
+    'warehouse_kpi_snapshot'
+  ];
+
+  for (const t of expectedTables) {
+    const ddl = parseDDL(t);
+    const sqlBody = stripComments(ddl.raw);
+
+    // Each table must reference acme-analytics.staging.<table>
+    assertIncludes('AC-6', `${t} references acme-analytics.staging.${t}`,
+      sqlBody, `\`acme-analytics.staging.${t}\``);
+
+    // Each table must have PARTITION BY
+    assert('AC-6', `${t} has PARTITION BY`,
+      ddl.partitionExpr !== null,
+      `No PARTITION BY found for ${t}`);
+  }
+
+  // Verify no STORED AS remnants across all tables
+  for (const t of expectedTables) {
+    const ddl = parseDDL(t);
+    const sqlBody = stripComments(ddl.raw);
+    assertNotIncludes('AC-6', `${t} has no STORED AS`,
+      sqlBody.toUpperCase(), 'STORED AS');
+  }
+
+  // Verify consolidated all_tables.sql exists and contains all 11 objects
+  const allTablesPath = '/workspace/project/bigquery/staging/all_tables.sql';
+  assert('AC-6', 'all_tables.sql exists', existsSync(allTablesPath), 'File not found');
+  if (existsSync(allTablesPath)) {
+    const allSql = readFileSync(allTablesPath, 'utf8');
+    for (const t of expectedTables) {
+      assertIncludes('AC-6', `all_tables.sql contains ${t}`,
+        allSql, `acme-analytics.staging.${t}`);
+    }
+    assertIncludes('AC-6', 'all_tables.sql contains v_returns_pending',
+      allSql, 'acme-analytics.staging.v_returns_pending');
+  }
+}
+
+// ─── AC-7: DECIMAL(14,2) → NUMERIC precision (offline DDL check) ──
+function testAC7() {
+  console.log('\nAC-7: DECIMAL(14,2) → NUMERIC precision (DDL check; round-trip in edge_value_probes.js)');
+
+  // Verify cleansed_orders has NUMERIC columns for the DECIMAL fields
+  const ddl = parseDDL('cleansed_orders');
+
+  assertColType('AC-7', 'cleansed_orders.net_amount is NUMERIC',
+    ddl.columns, 'net_amount', 'NUMERIC');
+  assertColType('AC-7', 'cleansed_orders.gross_amount is NUMERIC',
+    ddl.columns, 'gross_amount', 'NUMERIC');
+  assertColType('AC-7', 'cleansed_orders.discount is NUMERIC',
+    ddl.columns, 'discount', 'NUMERIC');
+  assertColType('AC-7', 'cleansed_orders.tax is NUMERIC',
+    ddl.columns, 'tax', 'NUMERIC');
+
+  // Verify no DECIMAL keyword in executable SQL (all should be NUMERIC)
+  const sqlBody = stripComments(ddl.raw);
+  assertNotIncludes('AC-7', 'no DECIMAL keyword in cleansed_orders DDL',
+    sqlBody.toUpperCase(), 'DECIMAL');
+
+  // Cross-check: other tables with DECIMAL columns also use NUMERIC
+  const productsDdl = parseDDL('cleansed_products');
+  assertColType('AC-7', 'cleansed_products.msrp is NUMERIC',
+    productsDdl.columns, 'msrp', 'NUMERIC');
+  assertColType('AC-7', 'cleansed_products.cost is NUMERIC',
+    productsDdl.columns, 'cost', 'NUMERIC');
+}
+
+// ─── AC-8: DOUBLE → FLOAT64 precision (offline DDL check) ─────────
+function testAC8() {
+  console.log('\nAC-8: DOUBLE → FLOAT64 precision (DDL check; round-trip in edge_value_probes.js)');
+
+  // Verify cleansed_customers has FLOAT64 columns for DOUBLE fields
+  const ddl = parseDDL('cleansed_customers');
+
+  assertColType('AC-8', 'cleansed_customers.geocoded_lat is FLOAT64',
+    ddl.columns, 'geocoded_lat', 'FLOAT64');
+  assertColType('AC-8', 'cleansed_customers.geocoded_lon is FLOAT64',
+    ddl.columns, 'geocoded_lon', 'FLOAT64');
+
+  // Cross-check: geocoded_addresses also has FLOAT64 for DOUBLE columns
+  const geoDdl = parseDDL('geocoded_addresses');
+  assertColType('AC-8', 'geocoded_addresses.lat is FLOAT64',
+    geoDdl.columns, 'lat', 'FLOAT64');
+  assertColType('AC-8', 'geocoded_addresses.lon is FLOAT64',
+    geoDdl.columns, 'lon', 'FLOAT64');
+
+  // Verify no DOUBLE keyword in executable SQL (all should be FLOAT64)
+  const sqlBody = stripComments(ddl.raw);
+  assertNotIncludes('AC-8', 'no DOUBLE keyword in cleansed_customers DDL',
+    sqlBody.toUpperCase(), 'DOUBLE');
 }
 
 // ─── Run all tests ─────────────────────────────────────────────────
@@ -331,7 +443,11 @@ function main() {
   testAC1();
   testAC2();
   testAC3();
+  testAC4();
+  testAC5();
   testAC6();
+  testAC7();
+  testAC8();
 
   // ─ Summary ──────────────────────────────────────────────────────
   console.log(`\n${'='.repeat(60)}`);
