@@ -239,14 +239,14 @@ All type conversions verified via Hive HQL → BigQuery DDL comparison:
 
 | Hive Type | BigQuery Type | Occurrences | Status |
 |-----------|--------------|-------------|--------|
-| STRING | STRING | 48 columns | ✓ |
-| INT | INT64 | 9 columns | ✓ |
-| BIGINT | INT64 | 3 columns | ✓ |
-| DECIMAL(p,s) | NUMERIC | 12 columns | ✓ |
-| DOUBLE | FLOAT64 | 4 columns | ✓ |
-| BOOLEAN | BOOL | 3 columns | ✓ |
-| TIMESTAMP | TIMESTAMP | 8 columns | ✓ |
-| DATE | DATE | 6 partition columns | ✓ |
+| STRING | STRING | 55 columns (54 data + 1 promoted partition) | ✓ |
+| INT | INT64 | 7 columns (`line_count`, `points`, `units_in`, `units_picked`, `units_shipped`, `backlog_units`, `avg_pick_ms`) | ✓ |
+| BIGINT | INT64 | 3 columns (`txn_id`, `return_id`, `customer_sk`) | ✓ |
+| DECIMAL(p,s) | NUMERIC | 11 columns across 8 tables | ✓ |
+| DOUBLE | FLOAT64 | 4 columns (`geocoded_lat`, `geocoded_lon` × 2 tables) | ✓ |
+| BOOLEAN | BOOL | 2 columns (`available`, `is_deleted`) + 1 view reference (`approved`) | ✓ |
+| TIMESTAMP | TIMESTAMP | 8 columns across 7 tables | ✓ |
+| DATE | DATE | 10 columns (6 native partition + 4 synthetic) | ✓ |
 | MAP\<STRING,STRING\> | JSON | 1 column (parsed\_loyalty\_events.meta) | ✓ |
 | ARRAY\<STRING\> | ARRAY\<STRING\> | 1 column (fraud\_scored.signals) | ✓ |
 
@@ -316,7 +316,7 @@ All 8 acceptance criteria are satisfied. The 10 staging tables and 1 view are re
 
 - **10 tables** dry-run with zero errors against BigQuery
 - **1 view** compiles correctly with fully-qualified cross-dataset reference
-- **93 columns** across all tables have correct Hive → BigQuery type mappings
+- **102 columns** across all 10 tables have correct Hive → BigQuery type mappings
 - **Partition/cluster transformations** correctly applied (native DATE kept, date\_ts→synthetic DATE, bucketing eliminated)
 - **NUMERIC precision** preserves all digits of DECIMAL(14,2) including edge value 99999999999999.99
 - **FLOAT64 precision** preserves full 17-significant-digit IEEE 754 fidelity including 0.30000000000000004
